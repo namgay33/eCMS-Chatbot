@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Electronic Customs Management Systems</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <style>
+           body {
+            font-family: Arial, sans-serif;
+            background-color: #f9f9f9;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: right;
+            align-items: end;
+            height: 100vh;
+            position: relative;
+        }
+
+        #chatbox {
+            width: 400px;
+            height: 0; /* Start with height 0 */
+            opacity: 0; /* Start with opacity 0 */
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            background: #fff;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: absolute;
+            bottom: 70px; /* Position above the icon */
+            right: 20px; /* Adjust as needed */
+            transition: height 2s ease, opacity 2s ease; /* Animate height and opacity */
+        }
+
+        #chatbox.open {
+            height: 500px; /* Target height */
+            opacity: 1; /* Target opacity */
+        }
+
+        #chatbox header {
+            background: blue;
+            color: white;
+            padding: 10px;
+            text-align: center;
+            font-size: 18px;
+            border-bottom: 1px solid #ccc;
+            font-family: Arial, sans-serif;
+        }
+
+        #chatbox .chatlogs {
+            padding: 16px;
+            padding-left: 10%;
+            flex: 1;
+            overflow-y: scroll;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #chatbox .chatlogs .message {
+            margin: 10px 0;
+            opacity: 0;
+            animation: fadeIn 0.5s forwards;
+        }
+
+        #chatbox .chatlogs .user {
+            text-align: right;
+            color: black;
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+        }
+
+        #chatbox .chatlogs .bot-wrapper {
+            padding-right: 10%;
+            position: relative;
+        }
+
+        #chatbox .chatlogs .greeting {
+            text-align: center;
+            color: black;
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+            position: relative;
+        }
+
+        #chatbox .chatlogs .greeting .greeting-bot {
+            display: inline-block;
+            margin-bottom: 10px;
+        }
+
+        #chatbox .chatlogs .greeting .greeting-image {
+            width: 200px;
+            height: 200px;
+            object-fit: cover;
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 10px;
+        }
+
+        #chatbox .chatlogs .bot {
+            text-align: left;
+            color: black;
+            background-color: #e1f5fe;
+            padding: 5%;
+            border-radius: 10px;
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+            position: relative;
+            display: inline-block;
+        }
+
+        #chatbox .chatlogs .bot::after {
+            content: "";
+            position: absolute;
+            bottom: -4px;
+            left: -6px;
+            width: 0;
+            height: 0;
+            border-left: 10px solid transparent;
+            border-right: 10px solid transparent;
+            border-top: 15px solid #e1f5fe;
+            border-bottom: 0;
+            transform: rotate(-63deg);
+            border-radius: 7px;
+        }
+
+        #chatbox .chatlogs .responder-image {
+            position: absolute;
+            bottom: -20px;
+            left: -34px;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 2px solid #e1f5fe;
+            object-fit: cover;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.5); }
+        }
+
+        .loader {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin: 2px;
+            background-color: green;
+            border-radius: 50%;
+            animation: bounce 1s infinite;
+        }
+
+        .loader:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .loader:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        #chatbox .input {
+            display: flex;
+            border-top: 1px solid #ccc;
+            padding: 5px;
+            background: #f1f1f1;
+        }
+
+        #chatbox .input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px 0 0 5px;
+            outline: none;
+            font-size: 12px;
+            font-family: Arial, sans-serif;
+        }
+
+        #chatbox .input button {
+            padding: 10px;
+            border: 1px solid #4CAF50;
+            background: #4CAF50;
+            color: white;
+            border-radius: 0 5px 5px 0;
+            cursor: pointer;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+        }
+
+        #chatbox .input button:hover {
+            background: #45a049;
+        }
+
+        .stopButton {
+            background: red !important;
+        }
+
+        #highlighted-questions {
+            padding: 10px;
+            border-top: 1px solid #ccc;
+            background: #f9f9f9;
+            border-bottom: 1px solid #ccc;
+            display: none;
+        }
+
+        #highlighted-questions button {
+            display: inline-block;
+            padding: 5px 10px;
+            margin: 5px 0;
+            border: none;
+            background: #4CAF50;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-family: Arial, sans-serif;
+        }
+
+        #highlighted-questions button:hover {
+            background: #45a049;
+        }
+
+        #voiceSearchButton {
+            padding: 10px;
+            border: 1px solid #4CAF50;
+            background: #4CAF50;
+            color: white;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 24px; /* Increased font size for better visibility */
+            font-family: Arial, sans-serif;
+            margin-left: 5px;
+            transition: background 0.3s, transform 0.3s;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .voiceSearchButton #voiceSearchButton:hover {
+            background: red;
+            color: red;
+        }
+
+        .voiceSearchButton #voiceSearchButton.active {
+            background: red;
+            border-radius: 50%;
+            transform: scale(1);
+        }
+
+        #chatIcon {
+            width: 50px;
+            height: 50px;
+            background: blue;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-size: 24px;
+            transition: background 0.3s, transform 0.3s;
+        }
+
+        #chatIcon:hover {
+            background: darkblue;
+            transform: scale(1.1);
+        }
+
+        #tryAgainChat {
+            display: none;
+            padding: 10px;
+            border: 1px solid #4CAF50;
+            background: #4CAF50;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+            margin: 10px;
+        }
+
+        #tryAgainChat:hover {
+            background: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="chatIcon" onclick="toggleChatbox()">💬</div>
+    <div id="chatbox">
+        <header>Electronic Customs Management System</header>
+        <div class="chatlogs" id="chatlogs">
+            <!-- Messages will be dynamically added here -->
+        </div>
+        <div id="highlighted-questions">
+            <button onclick="sendHighlightedQuestion('What is eCMS?')">⚖️ What is eCMS?</button>
+            <button onclick="sendHighlightedQuestion('How to register in eCMS?')">📝 How to register in eCMS?</button>
+            <button onclick="sendHighlightedQuestion('How is eCMS related to BTFN?')">💰 How is eCMS related to BTFN?</button>
+        </div>
+        <div class="input">
+            <input id="userInput" type="text" placeholder="Type your message here...">
+            <button id="sendStopButton" onclick="toggleSendStop()">Send</button>
+            <div class="voiceSearchButton">
+                <button id="voiceSearchButton"
+                title="Please Hold to Speak" 
+                onmousedown="startVoiceRecognition()" onmouseup="stopVoiceRecognition()">
+                    <i class="material-icons">mic</i>
+                </button>
+            </div>
+        </div>
+        <button id="tryAgainChat" onclick="restartChat()">Try Again</button>
+    </div>
+    <script>
+        const responderImageUrl = "{{ url_for('static', filename='images/responder.jpg') }}";
+        const greetingImageUrl = "{{ url_for('static', filename='images/greetingAI.jpg') }}";
+
+        let typingInterval;
+        let stopTypingFlag = false;
+        let recognition;
+        let loadingMessage;
+
+        // Extended list of bad words including additional words
+        const badWords = []; // Add more as needed
+
+        function toggleChatbox() {
+            const chatbox = document.getElementById("chatbox");
+            if (chatbox.classList.contains("open")) {
+                chatbox.classList.remove("open");
+                setTimeout(() => {
+                    chatbox.style.display = "none";
+                }, 500); // Wait for the height transition to complete before hiding
+            } else {
+                chatbox.style.display = "flex";
+                setTimeout(() => {
+                    chatbox.classList.add("open");
+                    voiceGreeting(); // Call voice greeting when chatbox opens
+                }, 10); // Short delay to ensure display is applied before starting transition
+            }
+        }
+
+        function typeMessage(message, callback) {
+            let i = 0;
+            const typingSpeed = 20;
+            const typingMessage = $(
+                `<div class="message bot-wrapper">
+                    <div class="bot"></div>
+                    <img src="${responderImageUrl}" class="responder-image" alt="Responder Image">
+                </div>`
+            );
+            $("#chatlogs").append(typingMessage);
+        
+            typingInterval = setInterval(() => {
+                if (i < message.length && !stopTypingFlag) {
+                    // Instead of just setting text, use HTML to properly format the response
+                    typingMessage.find(".bot").html(message.substring(0, i + 1));
+                    scrollToBottom();
+                    i++;
+                } else {
+                    clearInterval(typingInterval);
+                    if (callback) callback();
+                }
+            }, typingSpeed);
+        }
+        
+
+        function stopTyping() {
+            stopTypingFlag = true;
+            clearInterval(typingInterval);
+            setSendButton();
+        }
+
+        function showGreeting() {
+            const greetingMessage = "Welcome to eCMS chat! How can I assist you today?";
+            const greetingHTML = $(
+                `<div class="greeting">
+                    <div class="greeting-bot">${greetingMessage}</div>
+                    <img src="${greetingImageUrl}" class="greeting-image" alt="Greeting Image">
+                </div>`
+            );
+            $("#chatlogs").append(greetingHTML);
+            scrollToBottom();
+            $("#highlighted-questions").show();
+        }
+
+        function showLoadingAnimation() {
+            loadingMessage = $('<div class="message bot-wrapper"><div class="bot loading"></div></div>');
+            loadingMessage.find(".bot").append('<div class="loader"></div>');
+            loadingMessage.find(".bot").append('<div class="loader"></div>');
+            loadingMessage.find(".bot").append('<div class="loader"></div>');
+            $("#chatlogs").append(loadingMessage);
+            scrollToBottom();
+        }
+
+        function removeLoadingAnimation() {
+            if (loadingMessage) {
+                loadingMessage.remove();
+                loadingMessage = null;
+            }
+        }
+
+        function scrollToBottom() {
+            const chatlogs = document.getElementById("chatlogs");
+            chatlogs.scrollTop = chatlogs.scrollHeight;
+        }
+
+        function containsBadWords(text) {
+            const lowerCaseText = text.toLowerCase();
+            return badWords.some(word => lowerCaseText.includes(word));
+        }
+
+        function disableChat() {
+            $("#userInput").prop("disabled", true);
+            $("#sendStopButton").prop("disabled", true);
+            $("#voiceSearchButton").prop("disabled", true);
+        }
+
+        function enableChat() {
+            $("#userInput").prop("disabled", false);
+            $("#sendStopButton").prop("disabled", false);
+            $("#voiceSearchButton").prop("disabled", false);
+        }
+
+        function sendMessage() {
+            const userInput = $("#userInput").val();
+            if (containsBadWords(userInput)) {
+                $("#chatlogs").append('<div class="message bot-wrapper"><div class="bot">Your message contains inappropriate content. Please refrain from using such language.</div></div>');
+                scrollToBottom();
+                disableChat();
+                $("#tryAgainChat").show();
+                return;
+            }
+
+            if (userInput.trim() !== "") {
+                $("#userInput").val("");
+                const userMessageHTML = `<div class="message user">${userInput}</div>`;
+                $("#chatlogs").append(userMessageHTML);
+                scrollToBottom();
+
+                showLoadingAnimation();
+
+                setTimeout(() => {
+                    $.get("/get", { msg: userInput }, function(data) {
+                        stopTypingFlag = false;
+                        removeLoadingAnimation();
+                        typeMessage(data.message, function() {
+                            scrollToBottom();
+                            setSendButton();
+                        });
+                    }).fail(function() {
+                        const errorMessage = "Sorry, there was an error fetching the response.";
+                        removeLoadingAnimation();
+                        typeMessage(errorMessage, function() {
+                            scrollToBottom();
+                            setSendButton();
+                        });
+                    });
+                }, 3000); // Simulate loading delay
+            }
+        }
+
+        function sendHighlightedQuestion(question) {
+            $("#userInput").val(question);
+            toggleSendStop();
+        }
+
+        function setSendButton() {
+            const button = $("#sendStopButton");
+            button.text("Send");
+            button.removeClass("stopButton");
+        }
+
+        function setStopButton() {
+            const button = $("#sendStopButton");
+            button.text("Stop");
+            button.addClass("stopButton");
+        }
+
+        function toggleSendStop() {
+            const userInput = $("#userInput").val();
+            if (userInput.trim() === "") {
+                setSendButton();
+                stopTyping();
+                return;
+            }
+            const button = $("#sendStopButton");
+            if (button.text() === "Send") {
+                setStopButton();
+                sendMessage();
+            } else {
+                setSendButton();
+                stopTyping();
+            }
+        }
+
+        function startVoiceRecognition() {
+            if (!('webkitSpeechRecognition' in window)) {
+                alert("Sorry, your browser doesn't support speech recognition. Consider using a different browser.");
+                return;
+            }
+
+            recognition = new webkitSpeechRecognition();
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = function() {
+                console.log('Voice recognition started.');
+                $("#voiceSearchButton").addClass("active");
+            };
+
+            recognition.onresult = function(event) {
+                const transcript = event.results[0][0].transcript;
+                $("#userInput").val(transcript);
+                toggleSendStop();
+            };
+
+            recognition.onerror = function(event) {
+                console.error('Voice recognition error', event.error);
+            };
+
+            recognition.onend = function() {
+                console.log('Voice recognition ended.');
+                $("#voiceSearchButton").removeClass("active");
+            };
+
+            recognition.start();
+        }
+
+        function stopVoiceRecognition() {
+            if (recognition) {
+                recognition.stop();
+                $("#voiceSearchButton").removeClass("active");
+            }
+        }
+
+        function voiceGreeting() {
+            const greeting = new Audio("{{ url_for('static', filename='audio/greeting.mp3') }}");
+            greeting.play().catch(error => {
+                console.error('Failed to play greeting:', error);
+            });
+        }
+
+        function restartChat() {
+            $("#chatlogs").empty();
+            $("#userInput").val("");
+            enableChat();
+            $("#tryAgainChat").hide();
+            showGreeting();
+        }
+
+        $(document).ready(function() {
+            restartChat();
+            $("#highlighted-questions").show(); // Show highlighted questions by default
+        });
+    </script>
+</body>
+</html>
