@@ -5,6 +5,8 @@ import config
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
 import random
+from datetime import datetime
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -55,7 +57,6 @@ def get_response(query):
         responses.append(f"<p><strong>Question:</strong> {question}<br><strong>Response:</strong> {response}</p>")
     
     return "\n".join(responses)  # Join all responses into a single string
-
 
 def greet(sentence):
     GREET_INPUTS = ("hello", "hi", "kuzu zangpo la", "kuzu")
@@ -115,16 +116,38 @@ def insert_chat_log(user_input, response):
     try:
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
-        query = "INSERT INTO ecms_chatbot_logs (user_input, response) VALUES (%s, %s)"
-        cursor.execute(query, (user_input, response))
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Split the response into individual questions and responses
+        formatted_response = format_response(response)
+        for question, answer in parse_response(formatted_response):
+            query = "INSERT INTO ecms_chatbot_logs (user_input, response, timestamp) VALUES (%s, %s, %s)"
+            cursor.execute(query, (user_input, f"Question: {question} <br> Response: {answer}", timestamp))
+
         conn.commit()
         cursor.close()
         conn.close()
-        print("Chat log inserted successfully.")  # Debug statement
+        print("Chat log inserted successfully.")
     except mysql.connector.Error as err:
         print(f"Error: {err}")
     except Exception as e:
         print(f"Unexpected error: {e}")
+
+def format_response(response):
+    return response.replace('\n', '<br>')
+
+def parse_response(response):
+    soup = BeautifulSoup(response, 'html.parser')
+    questions = soup.find_all('strong', text=lambda x: x and x.startswith('Question:'))
+    answers = soup.find_all('strong', text=lambda x: x and x.startswith('Response:'))
+
+    parsed_pairs = []
+    for question, answer in zip(questions, answers):
+        q_text = question.next_sibling.strip()
+        a_text = answer.next_sibling.strip()
+        parsed_pairs.append((q_text, a_text))
+
+    return parsed_pairs
 
 if __name__ == '__main__':
     test_db_connection()  # Test the connection when starting the application

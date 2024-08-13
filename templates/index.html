@@ -42,7 +42,7 @@
         }
 
         #chatbox header {
-            background: blue;
+            background: #3535ff;
             color: white;
             padding: 10px;
             text-align: center;
@@ -259,7 +259,7 @@
         #chatIcon {
             width: 50px;
             height: 50px;
-            background: blue;
+            background: #3535ff;
             color: white;
             border-radius: 50%;
             display: flex;
@@ -331,7 +331,7 @@
         let loadingMessage;
 
         // Extended list of bad words including additional words
-        const badWords = []; // Add more as needed
+        const badWords = ['fuck','suck', 'dha', 'motherfucker', 'dick', 'thu']; // Add more as needed
 
         function toggleChatbox() {
             const chatbox = document.getElementById("chatbox");
@@ -434,7 +434,7 @@
         function sendMessage() {
             const userInput = $("#userInput").val();
             if (containsBadWords(userInput)) {
-                $("#chatlogs").append('<div class="message bot-wrapper"><div class="bot">Your message contains inappropriate content. Please refrain from using such language.</div></div>');
+                $("#chatlogs").append('<div class="message bot-wrapper"><div class="bot">Your message contains inappropriate content. Please refrain from using it.</div></div>');
                 scrollToBottom();
                 disableChat();
                 $("#tryAgainChat").show();
@@ -557,12 +557,25 @@
             enableChat();
             $("#tryAgainChat").hide();
             showGreeting();
+            toggleSendStop();
         }
 
         $(document).ready(function() {
             restartChat();
-            $("#highlighted-questions").show(); // Show highlighted questions by default
+            $("#highlighted-questions").show(); 
         });
+        $(document).ready(function() {
+            restartChat();
+            $("#highlighted-questions").show(); 
+            // Listen for the Enter key in the input field
+            $("#userInput").keypress(function(event) {
+                if (event.which == 13) { 
+                    event.preventDefault(); 
+                    toggleSendStop(); 
+                }
+            });
+        });
+        
     </script>
 </body>
 </html>
