@@ -37,12 +37,31 @@
         }
 
         #chatbox.open {
-            height: 500px; /* Target height */
+            height: 85vh; /* Target height */
             opacity: 1; /* Target opacity */
+        }
+        .logo-header {
+            display: flex;
+            align-items: center; /* Aligns items vertically centered */
+            background: linear-gradient(90deg, #8fcafe 0%, rgba(83,161,224,1) 47%, rgba(0,139,255,1) 100%);
+        }
+        
+        .logo-header .logo {
+            height: 30px; 
+            width: 30px;
+            margin-right: 5px; 
+            margin-left: 5px;
+            border-radius: 50%;
+            
+        }
+        
+        .logo-header header {
+            font-size: 18px; /* Adjust the font size as needed */
+            color: white; /* Ensure this matches the overall design */
         }
 
         #chatbox header {
-            background: #3535ff;
+            background: linear-gradient(90deg, #8ac9ff 0%, rgba(83,161,224,1) 47%, rgba(0,139,255,1) 100%);
             color: white;
             padding: 10px;
             text-align: center;
@@ -106,7 +125,7 @@
             text-align: left;
             color: black;
             background-color: #e1f5fe;
-            padding: 5%;
+            padding: 3% 5% 3% 5%;
             border-radius: 10px;
             font-size: 12px;
             font-family: Arial, sans-serif;
@@ -210,10 +229,12 @@
             background: #f9f9f9;
             border-bottom: 1px solid #ccc;
             display: none;
+            white-space: nowrap; /* Prevent line breaks */
+            overflow-x: auto; /* Enable horizontal scrolling */
         }
-
+        
         #highlighted-questions button {
-            display: inline-block;
+            display: inline-block; /* Lay buttons in a row */
             padding: 5px 10px;
             margin: 5px 0;
             border: none;
@@ -223,8 +244,9 @@
             cursor: pointer;
             border-radius: 5px;
             font-family: Arial, sans-serif;
+            margin-right: 10px; /* Add space between buttons */
         }
-
+        
         #highlighted-questions button:hover {
             background: #45a049;
         }
@@ -259,7 +281,7 @@
         #chatIcon {
             width: 50px;
             height: 50px;
-            background: #3535ff;
+            background: linear-gradient(90deg, rgba(138,201,255,1) 0%, rgba(83,161,224,1) 47%, rgba(0,139,255,1) 100%);
             color: white;
             border-radius: 50%;
             display: flex;
@@ -294,12 +316,19 @@
         #tryAgainChat:hover {
             background: #45a049;
         }
+
+
+        
     </style>
 </head>
 <body>
     <div id="chatIcon" onclick="toggleChatbox()">💬</div>
     <div id="chatbox">
-        <header>Electronic Customs Management System</header>
+        <div class="logo-header">
+            <img src="/static/images/logo.png" alt="" class="logo">
+            <header>Electronic Customs Management System</header>
+        </div>
+        
         <div class="chatlogs" id="chatlogs">
             <!-- Messages will be dynamically added here -->
         </div>
