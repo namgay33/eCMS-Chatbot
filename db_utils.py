@@ -8,19 +8,25 @@ load_dotenv()
 MYSQL_CONFIG = {
     'host': os.environ.get("DB_HOST", "localhost"),
     'port': int(os.environ.get("DB_PORT", "3306")),
-    'user': os.environ.get("DB_USER", "root"),
+    'user': os.environ.get("DB_USER", ""),
     'password': os.environ.get("DB_PASSWORD", ""),
-    'database': os.environ.get("DB_NAME", "ecmschatbotdb")
+    'database': os.environ.get("DB_NAME", "ecmschatbotdb"),
+    'charset': 'utf8mb4',  # Important for special characters/Dzongkha
+    'collation': 'utf8mb4_unicode_ci'
 }
 
 
 @contextmanager
 def get_db_connection():
-    conn = mysql.connector.connect(**MYSQL_CONFIG)
+    conn = None
     try:
+        conn = mysql.connector.connect(**MYSQL_CONFIG)
         yield conn
+    except mysql.connector.Error as err:
+        print(f"❌ Database Connection Error: {err}")
+        raise
     finally:
-        if conn.is_connected():
+        if conn and conn.is_connected():
             conn.close()
 
 
@@ -35,7 +41,7 @@ def init_database():
         embedding JSON NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_chunk (source, section, chunk_text(255))
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
     
     create_logs = """
@@ -44,7 +50,7 @@ def init_database():
         user_input TEXT,
         response TEXT,
         timestamp DATETIME
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
     
     with get_db_connection() as conn:

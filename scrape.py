@@ -10,10 +10,13 @@ OUTPUT_FILE = "ecms_content.json"
 DOCUMENTS_FOLDER = "./documents"
 URLS_FILE = "./urls.txt"
 
+# Updated patterns to explicitly catch Exemption and Duty Free files for TRADER side
 TRADER_PATTERNS = [
+    r'Exemption', 
+    r'Duty free', 
+    r'Annual Exemption',
     r'^1\.', r'^2\.1', r'^2\.2', r'^2\.3', r'^3\.1', r'^4\.', 
-    r'Annual Exemption', r'^Declaration', r'^Duty free application',
-    r'^Duty free quota$', r'^Exemption', r'^FE Export', r'^PCA', r'^TIER'
+    r'^Declaration', r'^FE Export', r'^PCA', r'^TIER'
 ]
 
 CUSTOMS_PATTERNS = [
@@ -22,6 +25,11 @@ CUSTOMS_PATTERNS = [
 ]
 
 def detect_side(filename):
+    # Check specific keywords first for higher priority
+    filename_lower = filename.lower()
+    if 'exemption' in filename_lower or 'duty free' in filename_lower:
+        return 'TRADER'
+        
     for pattern in TRADER_PATTERNS:
         if re.search(pattern, filename, re.IGNORECASE):
             return 'TRADER'
@@ -32,6 +40,7 @@ def detect_side(filename):
 
 def clean_filename(filename):
     name = Path(filename).stem
+    # Keep "Exemption" and "Duty Free" intact, remove numbering like "1.", "2.1", "A."
     name = re.sub(r'^\d+(\.\d+)?\s*[\.\-]?\s*', '', name)
     name = re.sub(r'^[A-Za-z]\.\s*', '', name)
     name = re.sub(r'^ii\.', '', name)
@@ -49,10 +58,11 @@ def extract_docx_enhanced(path):
             continue
         
         style_name = para.style.name.lower() if para.style else ""
+        # Improved heading detection
         is_heading = (
             'heading' in style_name or 
             'title' in style_name or
-            (len(text) < 120 and not text.endswith('.') and text[0].isupper())
+            (len(text) < 100 and not text.endswith('.') and text[0].isupper() and not text[0].isdigit())
         )
         
         if is_heading and current_section["content"]:
@@ -89,15 +99,12 @@ def scrape_url(url):
         
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Remove scripts/styles but KEEP tables and their structure
         for tag in soup(['script', 'style']):
             tag.decompose()
         
         title = soup.title.string.strip() if soup.title else url
         
-        # For contact pages, preserve table structure as text
         if 'contact' in url.lower():
-            # Find the contact table specifically
             tables = soup.find_all('table')
             contact_text = f"SOURCE: {url}\nTITLE: {title}\n\n"
             
@@ -110,11 +117,9 @@ def scrape_url(url):
                         contact_text += row_text + "\n"
                 contact_text += "\n"
             
-            # Also get any extra text after tables
             main = soup.find('main') or soup.find('div', class_=re.compile('content|main'))
             if main:
                 extra = main.get_text(separator='\n', strip=True)
-                # Remove table content duplicates
                 extra_lines = [l for l in extra.split('\n') if l.strip() and l.strip() not in contact_text]
                 if extra_lines:
                     contact_text += "\nEXTRA INFO:\n" + "\n".join(extra_lines[:20])
@@ -127,7 +132,6 @@ def scrape_url(url):
                 "side": "GENERAL"
             }
         
-        # Normal pages
         main = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|main'))
         text = main.get_text(separator='\n', strip=True) if main else soup.get_text(separator='\n', strip=True)
         
@@ -151,7 +155,7 @@ def main():
     doc_folder = Path(DOCUMENTS_FOLDER)
     if doc_folder.exists():
         docx_files = sorted(doc_folder.glob("*.docx"))
-        print(f"📁 Found {len(docx_files)} DOCX files")
+        print(f" Found {len(docx_files)} DOCX files")
         
         for file_path in docx_files:
             side = detect_side(file_path.name)
@@ -163,6 +167,7 @@ def main():
             text = re.sub(r'\s+', ' ', text).strip()
             
             if text and len(text) > 50:
+                # Prepend side and name to help the LLM identify the source
                 contextual_text = f"[{side}] {clean_name}\n\n{text}"
                 
                 all_data.append({
@@ -174,14 +179,14 @@ def main():
                 })
                 print(f"    ✓ {len(text)} chars")
             else:
-                print(f"    ⚠️ Empty or too short")
+                print(f"    ️ Empty or too short")
     
     url_file = Path(URLS_FILE)
     if url_file.exists():
         urls = [u.strip() for u in url_file.read_text().splitlines() 
                 if u.strip() and not u.strip().startswith('#')]
         
-        print(f"\n🌐 Found {len(urls)} URLs")
+        print(f"\n Found {len(urls)} URLs")
         for url in urls:
             print(f"  🌐 {url}")
             result = scrape_url(url)

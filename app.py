@@ -36,6 +36,11 @@ RULES:
 - Answer using ONLY the facts in the context
 - NEVER invent contact details not in the context
 - TPN means Tax Payer Number
+- BTFN means Bhutan Trade FinNet used by RMA
+- RMA means Royal Monetary Authority of Bhutan
+- eCMS means Electronic Customs Management System (trade records, taxes, passengers travel record, etc)
+- BTFN is not a specific module within the eCMS platform
+- Both eCMS (trade records) and BTFN (related to monetary) are used by all the countries, not only India
 - Not all services require full registration
 - NEVER mention document names or .docx files
 - For "overall process" or "how does trade work" questions, COMBINE information from multiple procedures (declaration, payment, manifest, clearance) into a step-by-step flow
@@ -208,15 +213,38 @@ def search_knowledge(question, top_k=4, threshold=0.55):
     conn.close()
     
     scored = []
+    q_lower = question.lower()
+    
+    # Keywords that should trigger specific document filtering
+    exemption_keywords = ['exemption', 'duty free', 'waiver', 'quota']
+    is_exemption_query = any(kw in q_lower for kw in exemption_keywords)
+
     for row in rows:
         emb = json.loads(row['embedding'])
         score = cosine_similarity(question_vector, emb)
-        scored.append({'score': score, 'source': row['source'], 'section': row['section'], 'text': clean_chunk_text(row['chunk_text'])})
+        
+        # Boost score significantly if it's an exemption query and the source matches
+        if is_exemption_query:
+            source_lower = row['source'].lower()
+            if any(kw in source_lower for kw in exemption_keywords):
+                score += 0.2  # Artificial boost to prioritize these docs
+
+        scored.append({
+            'score': score, 
+            'source': row['source'], 
+            'section': row['section'], 
+            'text': clean_chunk_text(row['chunk_text'])
+        })
     
     scored.sort(key=lambda x: x['score'], reverse=True)
+    
+    # Filter by threshold
     results = [r for r in scored[:top_k] if r['score'] >= threshold]
+    
+    # Fallback: if no results meet threshold, take the best one anyway to avoid empty response
     if not results and scored:
         results = [scored[0]]
+        
     return results
 
 
@@ -290,7 +318,7 @@ RULES:
 - Finally clearance/release
 - Use simple numbered steps
 - NEVER mention document names
-- DO NOT use Markdown formatting. Do NOT use bold (**text**) or italics. Use plain text only.
+- DO NOT use Markdown formatting. Use plain text only.
 
 USER QUESTION: {question}
 
@@ -317,11 +345,28 @@ ANSWER:""".format(context=process_text, question=question)
     chain = rag_prompt | llm
     answer = chain.invoke({"context": context, "question": question})
     
+    # Clean up Markdown
+    answer = re.sub(r'\*\*', '', answer)
+    answer = re.sub(r'\*', '', answer)
+    
+    # Clean up Document references
     answer = re.sub(r'\(?Document \d+:.*\.docx\)?', '', answer, flags=re.IGNORECASE)
     answer = re.sub(r'\[?Source:.*?\]?', '', answer, flags=re.IGNORECASE)
     answer = re.sub(r'according to .*?document', '', answer, flags=re.IGNORECASE)
     answer = re.sub(r'as per .*?document', '', answer, flags=re.IGNORECASE)
     answer = re.sub(r'\(.*\.docx.*\)', '', answer, flags=re.IGNORECASE)
+    
+    # Detect Hallucination/Assumptions
+    hallucination_indicators = [
+        "based on general assumptions",
+        "context does not provide",
+        "i don't have specific information",
+        "please contact eCMS support",
+        "not found in the context"
+    ]
+    if any(indicator in answer.lower() for indicator in hallucination_indicators):
+        return "I don't have specific information on that procedure in my current database. Please contact eCMS support for detailed guidance."
+
     answer = re.sub(r'\n+', '\n', answer)
     answer = re.sub(r' {2,}', ' ', answer)
     return answer.strip()
@@ -361,8 +406,7 @@ def get_highlighted_questions():
         "⚖️ What is eCMS?",
         "📝 How to register in eCMS?",
         "💰 How is eCMS related to BTFN?",
-        "📞 Contact eCMS Thimphu",
-        "📞 Contact eCMS Gelephu"
+        "❓ How does eCMS work?"
     ]
 
 
