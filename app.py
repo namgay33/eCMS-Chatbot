@@ -1,156 +1,403 @@
-from flask import Flask, render_template, request
-import mysql.connector
-import h5py
-import config
-import numpy as np
-from sentence_transformers import SentenceTransformer, util
+import os
+import re
+import json
 import random
 from datetime import datetime
-from bs4 import BeautifulSoup
+import numpy as np
+from flask import Flask, render_template, request
+import mysql.connector
+from langchain_ollama import OllamaEmbeddings, OllamaLLM
+from langchain_core.prompts import PromptTemplate
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# Database configuration
-db_config = {
-    'user': config.DB_USER,
-    'password': config.DB_PASSWORD,
-    'host': config.DB_HOST,
-    'database': config.DB_NAME,
-    'port': config.DB_PORT
+DB_CONFIG = {
+    'host': os.environ.get("DB_HOST", "localhost"),
+    'port': int(os.environ.get("DB_PORT", "3306")),
+    'user': os.environ.get("DB_USER", ""),
+    'password': os.environ.get("DB_PASSWORD", ""),
+    'database': os.environ.get("DB_NAME", "ecmschatbotdb")
 }
 
-# Load the .h5 model
-def load_model():
-    with h5py.File('ecmschatbot_model.h5', 'r') as hf:
-        questions_embeddings = np.array(hf['questions_embeddings'])
-        answers = [ans.decode('utf-8') for ans in hf['answers']]
-    return questions_embeddings, answers
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
 
-questions_embeddings, answers = load_model()
+embedder = OllamaEmbeddings(model=OLLAMA_MODEL)
+llm = OllamaLLM(model=OLLAMA_MODEL, temperature=0.1)
 
-# Initialize SentenceTransformer model
-model = SentenceTransformer('all-MiniLM-L6-v2')
+RAG_PROMPT = """You are the eCMS Virtual Assistant. Answer based ONLY on the context provided.
 
-# Preprocess text
-def preprocess_text(text):
-    return ' '.join(text.lower().split())
+CONTEXT:
+{context}
 
-# Get response based on the query
-def get_response(query):
-    # Split the query into individual questions based on semicolons
-    questions = [q.strip() for q in query.split(';')]
+RULES:
+- Answer using ONLY the facts in the context
+- NEVER invent contact details not in the context
+- TPN means Tax Payer Number
+- Not all services require full registration
+- NEVER mention document names or .docx files
+- For "overall process" or "how does trade work" questions, COMBINE information from multiple procedures (declaration, payment, manifest, clearance) into a step-by-step flow
+- Explain the end-to-end process: registration → declaration → payment → customs approval → clearance
+- DO NOT use Markdown formatting. Do NOT use bold (**text**) or italics (*text*). Use plain text only.
+- Use simple numbered lists (1. Step one) without bolding the titles.
 
-    responses = []
-    for question in questions:
-        query_processed = preprocess_text(question)
-        query_embedding = model.encode(query_processed, convert_to_tensor=True)
-        similarities = util.pytorch_cos_sim(query_embedding, questions_embeddings)
-        index = np.argmax(similarities)
-        similarity_score = similarities[0, index].item()
+USER QUESTION: {question}
 
-        if similarity_score < 0.6:
-            response = "I am sorry! I don't have the related information. Please, contact with the concerned person."
-        else:
-            response = answers[index]
-        
-        # Format response for the question
-        responses.append(f"<p><strong>Question:</strong> {question}<br><strong>Response:</strong> {response}</p>")
-    
-    return "\n".join(responses)  # Join all responses into a single string
+ANSWER:"""
+
+rag_prompt = PromptTemplate.from_template(RAG_PROMPT)
+
+
+def get_db_connection():
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def init_database():
+    create_knowledge = """
+    CREATE TABLE IF NOT EXISTS ecms_knowledge (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        source VARCHAR(255) NOT NULL,
+        section VARCHAR(100),
+        chunk_text TEXT NOT NULL,
+        embedding JSON NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+    create_logs = """
+    CREATE TABLE IF NOT EXISTS ecms_chatbot_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_input TEXT,
+        response TEXT,
+        timestamp DATETIME
+    )
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(create_knowledge)
+    cursor.execute(create_logs)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("✅ Database initialized.")
+
 
 def greet(sentence):
-    GREET_INPUTS = ("hello", "hi", "kuzu zangpo la", "kuzu")
+    GREET_INPUTS = ("hello", "kuzu zangpo la", "kuzu")
     GREET_RESPONSE = "Kuzu Zangpo La, Welcome to eCMS. How can I assist you?"
-    sentence_no_spaces = sentence.replace(" ", "").lower()
+    sentence_lower = sentence.lower().strip()
+    
     for word in GREET_INPUTS:
-        if word.replace(" ", "").lower() in sentence_no_spaces:
+        if word.lower() == sentence_lower:
             return GREET_RESPONSE
     return None
+
+
+def cosine_similarity(a, b):
+    a, b = np.array(a), np.array(b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    if norm == 0:
+        return 0.0
+    return float(np.dot(a, b) / norm)
+
+
+def clean_chunk_text(raw_text):
+    text = re.sub(r'^\[(TRADER|CUSTOMS|GENERAL)\]\s+', '', raw_text)
+    text = re.sub(r'DOCUMENT:.*?\nSOURCE:.*?\nTYPE:.*?\n\n', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[TABLE\]\n?', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {2,}', ' ', text)
+    return text.strip()
+
+
+def is_contact_query(question):
+    q = question.lower()
+    contact_words = ['contact', 'phone', 'email', 'call', 'reach', 'focal', 
+                     'help desk', 'support', 'hotline', 'office', 'address',
+                     'thimphu', 'gelephu', 'paro', 'samdrup', 'samtse', 
+                     'phuntsholing', 'phuentsholing', 'kolkata', 'jonkhar',
+                     'jongkhar', 'rrco']
+    return any(w in q for w in contact_words)
+
+def is_process_query(question):
+    q = question.lower()
+    process_words = ['process', 'how does', 'overall', 'end to end', 'workflow', 
+                     'import export', 'trade process', 'how do i trade', 'complete process']
+    return any(w in q for w in process_words)
+
+def parse_contact_table(text):
+    contacts = []
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('SOURCE:') or line.startswith('TITLE:'):
+            continue
+        parts = [p.strip() for p in line.split('|')]
+        if any(h in line.lower() for h in ['sl#', 'department', 'name', 'phone number', 'email']):
+            continue
+        if len(parts) >= 4:
+            dept = parts[1] if len(parts) > 1 else ''
+            location = 'Thimphu'
+            if 'Thimphu' in dept: location = 'Thimphu'
+            elif 'Gelephu' in dept: location = 'Gelephu'
+            elif 'Paro' in dept: location = 'Paro'
+            elif 'Samdrup' in dept or 'Jongkhar' in dept: location = 'Samdrup Jongkhar'
+            elif 'Samtse' in dept: location = 'Samtse'
+            elif 'Phuntsholing' in dept or 'Phuentsholing' in dept or 'Phuntsoling' in dept: location = 'Phuntsholing'
+            elif 'Kolkata' in dept or 'Kolkatta' in dept: location = 'Kolkata'
+            
+            phone = ''
+            email = ''
+            for p in parts:
+                if '@' in p: email = p.strip()
+                elif re.search(r'\d{5,}', p): phone = p.strip()
+            
+            if phone or email:
+                contacts.append({'department': dept, 'location': location, 'phone': phone or 'N/A', 'email': email or 'N/A'})
+    return contacts
+
+
+def get_contacts_by_location(question, all_contacts):
+    q_lower = question.lower()
+    location_map = {
+        'thimphu': ['thimphu'], 'gelephu': ['gelephu'], 'paro': ['paro'],
+        'samdrup': ['samdrup', 'jongkhar', 'samdrup jongkhar', 'samdrupjongkhar', 'sj'],
+        'samdrup jongkhar': ['samdrup', 'jongkhar', 'samdrup jongkhar', 'samdrupjongkhar', 'sj'],
+        'samtse': ['samtse'], 'phuntsholing': ['phuntsholing', 'phuentsholing', 'phuntsoling', 'pling', 'p/ling'],
+        'kolkata': ['kolkata', 'kolkatta', 'kolka','calcutta'],
+    }
+    asked_location = None
+    for loc_key, variants in location_map.items():
+        if any(v in q_lower for v in variants):
+            asked_location = loc_key
+            break
+    if asked_location:
+        filtered = [c for c in all_contacts if c['location'].lower().replace(' ', '') == asked_location.replace(' ', '')]
+        if not filtered:
+            filtered = [c for c in all_contacts if asked_location.replace(' ', '') in c['location'].lower().replace(' ', '')]
+        return filtered
+    return all_contacts
+
+
+def format_contacts(contacts):
+    if not contacts:
+        return "I don't have contact information for that location. Please visit https://www.ecms.gov.bt/contact-us"
+    lines = []
+    for c in contacts:
+        loc = c.get('location', 'N/A')
+        dept = c.get('department', 'N/A')
+        phone = c.get('phone', 'N/A')
+        email = c.get('email', 'N/A')
+        lines.append(f"📍 {loc}")
+        if dept and dept != loc:
+            lines.append(f"   Department: {dept}")
+        lines.append(f"   Phone: {phone}")
+        lines.append(f"   Email: {email}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def search_knowledge(question, top_k=4, threshold=0.55):
+    question_vector = embedder.embed_query(question)
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT source, section, chunk_text, embedding FROM ecms_knowledge")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    scored = []
+    for row in rows:
+        emb = json.loads(row['embedding'])
+        score = cosine_similarity(question_vector, emb)
+        scored.append({'score': score, 'source': row['source'], 'section': row['section'], 'text': clean_chunk_text(row['chunk_text'])})
+    
+    scored.sort(key=lambda x: x['score'], reverse=True)
+    results = [r for r in scored[:top_k] if r['score'] >= threshold]
+    if not results and scored:
+        results = [scored[0]]
+    return results
+
+
+def get_response(question):
+    q_lower = question.lower().strip()
+    
+    if q_lower == 'kuzu zangpo la' or q_lower == 'kuzuzangpola':
+        return "Kuzu Zangpo La, Welcome to eCMS. How can I assist you?"
+    if q_lower == 'hi' or q_lower == 'hello':
+        return "Welcome to eCMS! How can I assist you?"
+    if q_lower == 'bye' or q_lower == 'goodbye':
+        return "Goodbye! Have a smooth customs experience."
+    if q_lower == 'thanks' or q_lower == 'thank you':
+        return "You are welcome!"
+    
+    if is_contact_query(q_lower):
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT chunk_text FROM ecms_knowledge WHERE source LIKE %s", ("%contact%",))
+        contact_rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if contact_rows:
+            all_contacts = []
+            for row in contact_rows:
+                text = clean_chunk_text(row['chunk_text'])
+                contacts = parse_contact_table(text)
+                all_contacts.extend(contacts)
+            
+            seen = set()
+            unique_contacts = []
+            for c in all_contacts:
+                key = (c['location'], c['phone'], c['email'])
+                if key not in seen and (c['phone'] != 'N/A' or c['email'] != 'N/A'):
+                    seen.add(key)
+                    unique_contacts.append(c)
+            
+            filtered = get_contacts_by_location(question, unique_contacts)
+            if filtered:
+                return format_contacts(filtered)
+            if unique_contacts:
+                return format_contacts(unique_contacts)
+    
+    if is_process_query(q_lower):
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT chunk_text FROM ecms_knowledge WHERE source LIKE %s OR source LIKE %s OR source LIKE %s OR source LIKE %s OR source LIKE %s",
+            ("%Registration%", "%Declaration%", "%Payment%", "%Clearance%", "%Manifest%")
+        )
+        process_rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if process_rows:
+            process_text = "\n\n".join([clean_chunk_text(r['chunk_text'])[:1500] for r in process_rows[:10]])
+            
+            process_prompt = """You are the eCMS Virtual Assistant. Describe the OVERALL import/export process using eCMS.
+
+Use the following procedure steps to build a complete end-to-end workflow:
+
+{context}
+
+RULES:
+- Combine steps from different procedures into ONE coherent flow
+- Start with trader registration
+- Then declaration creation
+- Then payment
+- Then customs processing/approval
+- Finally clearance/release
+- Use simple numbered steps
+- NEVER mention document names
+- DO NOT use Markdown formatting. Do NOT use bold (**text**) or italics. Use plain text only.
+
+USER QUESTION: {question}
+
+ANSWER:""".format(context=process_text, question=question)
+            
+            response = llm.invoke(process_prompt)
+            return response.strip()
+
+    chunks = search_knowledge(question)
+    if not chunks:
+        return "I don't have information on that eCMS procedure. Please visit https://www.ecms.gov.bt/contact-us for assistance."
+    
+    context_parts = []
+    for c in chunks:
+        lines = c['text'].split('\n')
+        if lines and lines[0].startswith('##'):
+            heading = lines[0].replace('##', '').strip()
+            body = '\n'.join(lines[1:])
+            context_parts.append(f"[{heading}]\n{body[:1800]}")
+        else:
+            context_parts.append(c['text'][:2000])
+    
+    context = "\n\n---\n\n".join(context_parts)
+    chain = rag_prompt | llm
+    answer = chain.invoke({"context": context, "question": question})
+    
+    answer = re.sub(r'\(?Document \d+:.*\.docx\)?', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\[?Source:.*?\]?', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'according to .*?document', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'as per .*?document', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\(.*\.docx.*\)', '', answer, flags=re.IGNORECASE)
+    answer = re.sub(r'\n+', '\n', answer)
+    answer = re.sub(r' {2,}', ' ', answer)
+    return answer.strip()
+
 
 @app.route("/")
 def home():
     return render_template('index.html')
 
+
 @app.route("/get")
 def get_bot_response():
-    user_response = request.args.get('msg')
-    if user_response:
-        user_response = user_response.lower()
-        if user_response != 'bye':
-            if user_response in ['thanks', 'thank you']:
-                response_message = "You are Welcome.."
-            else:
-                if greet(user_response) is not None:
-                    response_message = greet(user_response)
-                else:
-                    response_message = get_response(user_response)
-            insert_chat_log(user_response, response_message)  # Insert chat log
-            return {"message": response_message, "highlighted_questions": get_highlighted_questions()}
+    user_response = request.args.get('msg', '').strip()
+    
+    if not user_response:
+        return {"message": "Please type your question.", "highlighted_questions": get_highlighted_questions()}
+    
+    user_lower = user_response.lower()
+    
+    if user_lower == 'bye':
+        response_message = "Goodbye! Take Care <3"
+    elif user_lower in ('thanks', 'thank you'):
+        response_message = "You are Welcome.."
+    else:
+        greeting = greet(user_lower)
+        if greeting:
+            response_message = greeting
         else:
-            response_message = "Goodbye! Take Care <3"
-            insert_chat_log(user_response, response_message)  # Insert chat log
-            return {"message": response_message, "highlighted_questions": get_highlighted_questions()}
-    return {"message": "I am sorry! Please! Contact with the concerned person.", "highlighted_questions": get_highlighted_questions()}
+            response_message = get_response(user_response)
+    
+    insert_chat_log(user_response, response_message)
+    return {"message": response_message, "highlighted_questions": get_highlighted_questions()}
+
 
 def get_highlighted_questions():
     return [
         "⚖️ What is eCMS?",
         "📝 How to register in eCMS?",
-        "💰 How is eCMS related to BTFN?"
+        "💰 How is eCMS related to BTFN?",
+        "📞 Contact eCMS Thimphu",
+        "📞 Contact eCMS Gelephu"
     ]
 
-def test_db_connection():
-    try:
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        print("Database connection successful.")
-        cursor.close()
-        conn.close()
-    except mysql.connector.Error as err:
-        print(f"Error: {err}")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
 
 def insert_chat_log(user_input, response):
     try:
-        conn = mysql.connector.connect(**db_config)
+        conn = get_db_connection()
         cursor = conn.cursor()
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        # Split the response into individual questions and responses
-        formatted_response = format_response(response)
-        for question, answer in parse_response(formatted_response):
-            query = "INSERT INTO ecms_chatbot_logs (user_input, response, timestamp) VALUES (%s, %s, %s)"
-            cursor.execute(query, (user_input, f"Question: {question} <br> Response: {answer}", timestamp))
-
+        query = "INSERT INTO ecms_chatbot_logs (user_input, response, timestamp) VALUES (%s, %s, %s)"
+        cursor.execute(query, (user_input, response, timestamp))
         conn.commit()
         cursor.close()
         conn.close()
-        print("Chat log inserted successfully.")
-    except mysql.connector.Error as err:
-        print(f"Error: {err}")
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print(f"Error logging: {e}")
 
-def format_response(response):
-    return response.replace('\n', '<br>')
 
-def parse_response(response):
-    soup = BeautifulSoup(response, 'html.parser')
-    questions = soup.find_all('strong', text=lambda x: x and x.startswith('Question:'))
-    answers = soup.find_all('strong', text=lambda x: x and x.startswith('Response:'))
+@app.route("/admin/stats")
+def stats():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT COUNT(*) as total FROM ecms_knowledge")
+        knowledge = cursor.fetchone()['total']
+        cursor.execute("SELECT COUNT(*) as total FROM ecms_chatbot_logs")
+        logs = cursor.fetchone()['total']
+        cursor.close()
+        conn.close()
+        return {"knowledge_chunks": knowledge, "chat_logs": logs}
+    except Exception as e:
+        return {"error": str(e)}
 
-    parsed_pairs = []
-    for question, answer in zip(questions, answers):
-        q_text = question.next_sibling.strip()
-        a_text = answer.next_sibling.strip()
-        parsed_pairs.append((q_text, a_text))
-
-    return parsed_pairs
 
 if __name__ == '__main__':
-    test_db_connection()  # Test the connection when starting the application
-    port = 5000 + random.randint(0, 999)
-    url = "http://127.0.0.1:{0}".format(port)
-    app.run(use_reloader=False, debug=True, port=port)
+    init_database()
+    port = int(os.environ.get("FLASK_PORT", 5000))
+    print(f"🚀 eCMS Chatbot: http://127.0.0.1:{port}")
+    app.run(use_reloader=False, debug=False, port=port)
