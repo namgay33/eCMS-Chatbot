@@ -10,7 +10,6 @@ OUTPUT_FILE = "ecms_content.json"
 DOCUMENTS_FOLDER = "./documents"
 URLS_FILE = "./urls.txt"
 
-# Updated patterns to explicitly catch Exemption and Duty Free files for TRADER side
 TRADER_PATTERNS = [
     r'Exemption', 
     r'Duty free', 
@@ -25,22 +24,28 @@ CUSTOMS_PATTERNS = [
 ]
 
 def detect_side(filename):
-    # Check specific keywords first for higher priority
     filename_lower = filename.lower()
-    if 'exemption' in filename_lower or 'duty free' in filename_lower:
+    
+    if any(x in filename_lower for x in ['exemption', 'duty free', 'refund', 'quota']):
         return 'TRADER'
         
+    if any(x in filename_lower for x in ['registration', 'declaration', 'payment', 'pca', 'application']):
+        return 'TRADER'
+        
+    if any(x in filename_lower for x in ['clearance', 'offence', 'risk', 'valuation', 'admin', 'system']):
+        return 'CUSTOMS'
+
     for pattern in TRADER_PATTERNS:
         if re.search(pattern, filename, re.IGNORECASE):
             return 'TRADER'
     for pattern in CUSTOMS_PATTERNS:
         if re.search(pattern, filename, re.IGNORECASE):
             return 'CUSTOMS'
+            
     return 'GENERAL'
 
 def clean_filename(filename):
     name = Path(filename).stem
-    # Keep "Exemption" and "Duty Free" intact, remove numbering like "1.", "2.1", "A."
     name = re.sub(r'^\d+(\.\d+)?\s*[\.\-]?\s*', '', name)
     name = re.sub(r'^[A-Za-z]\.\s*', '', name)
     name = re.sub(r'^ii\.', '', name)
@@ -58,7 +63,6 @@ def extract_docx_enhanced(path):
             continue
         
         style_name = para.style.name.lower() if para.style else ""
-        # Improved heading detection
         is_heading = (
             'heading' in style_name or 
             'title' in style_name or
@@ -93,20 +97,50 @@ def extract_docx_enhanced(path):
 
 def scrape_url(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        resp = requests.get(url, headers=headers, timeout=15)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        }
+        
+        print(f"    → Fetching {url}...")
+        resp = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+        
+        # Check if we got redirected to a different page
+        if resp.url != url:
+            print(f"    → Redirected to {resp.url}")
+        
         resp.raise_for_status()
+        
+        # Check if we actually got HTML
+        content_type = resp.headers.get('content-type', '').lower()
+        if 'text/html' not in content_type:
+            print(f"    ⚠ Non-HTML content: {content_type}")
+            return None
         
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        for tag in soup(['script', 'style']):
+        for tag in soup(['script', 'style', 'nav', 'footer']):
             tag.decompose()
         
         title = soup.title.string.strip() if soup.title else url
         
-        if 'contact' in url.lower():
+        # BROADER contact detection - catch contact, contacts, contact-us, contactus, focal, helpdesk
+        url_lower = url.lower()
+        is_contact_page = any(x in url_lower for x in ['contact', 'focal', 'helpdesk', 'help-desk', 'support'])
+        
+        # Also check page title/content for contact indicators if URL doesn't match
+        if not is_contact_page and title:
+            title_lower = title.lower()
+            is_contact_page = any(x in title_lower for x in ['contact', 'focal person', 'help desk', 'support'])
+        
+        if is_contact_page:
+            print(f"    ✓ Detected as CONTACT page")
+            
+            # Extract ALL tables (contact info is usually in tables)
             tables = soup.find_all('table')
-            contact_text = f"SOURCE: {url}\nTITLE: {title}\n\n"
+            contact_text = f"SOURCE: {url}\nTITLE: {title}\nTYPE: CONTACT_PAGE\n\n"
             
             for table in tables:
                 rows = table.find_all('tr')
@@ -117,21 +151,37 @@ def scrape_url(url):
                         contact_text += row_text + "\n"
                 contact_text += "\n"
             
-            main = soup.find('main') or soup.find('div', class_=re.compile('content|main'))
+            # Also extract any paragraph/div text that might contain contact info
+            main = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|main|body'))
             if main:
-                extra = main.get_text(separator='\n', strip=True)
-                extra_lines = [l for l in extra.split('\n') if l.strip() and l.strip() not in contact_text]
+                # Get all paragraphs and divs with text
+                text_elements = main.find_all(['p', 'div', 'li'])
+                extra_lines = []
+                for elem in text_elements:
+                    text = elem.get_text(strip=True)
+                    if text and len(text) > 10:
+                        # Look for phone/email/location indicators
+                        if any(indicator in text.lower() for indicator in ['phone', 'tel', 'email', '@', 'thimphu', 'gelephu', 'paro', 'samdrup', 'samtse', 'phuntsholing', 'kolkata', 'office', 'department']):
+                            extra_lines.append(text)
+                
                 if extra_lines:
-                    contact_text += "\nEXTRA INFO:\n" + "\n".join(extra_lines[:20])
+                    contact_text += "\nEXTRA CONTACT INFO:\n" + "\n".join(extra_lines[:50])
+            
+            # If no tables found, just grab all text
+            if not tables:
+                text = soup.get_text(separator='\n', strip=True)
+                text = re.sub(r'\n+', '\n', text)
+                contact_text += "\nPAGE CONTENT:\n" + text[:10000]
             
             return {
-                "source": url,
+                "source": "contact_webpage",
                 "title": "Contact Us",
-                "content": contact_text[:25000],
+                "content": contact_text[:30000],
                 "type": "url",
                 "side": "GENERAL"
             }
         
+        # Non-contact pages
         main = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|main'))
         text = main.get_text(separator='\n', strip=True) if main else soup.get_text(separator='\n', strip=True)
         
@@ -145,13 +195,18 @@ def scrape_url(url):
             "type": "url",
             "side": "GENERAL"
         }
+        
+    except requests.exceptions.RequestException as e:
+        print(f"    ✗ Network error: {url} — {e}")
+        return None
     except Exception as e:
-        print(f"  ✗ Failed: {url} — {e}")
+        print(f"    ✗ Failed: {url} — {e}")
         return None
 
 def main():
     all_data = []
     
+    # Process DOCX files
     doc_folder = Path(DOCUMENTS_FOLDER)
     if doc_folder.exists():
         docx_files = sorted(doc_folder.glob("*.docx"))
@@ -167,7 +222,6 @@ def main():
             text = re.sub(r'\s+', ' ', text).strip()
             
             if text and len(text) > 50:
-                # Prepend side and name to help the LLM identify the source
                 contextual_text = f"[{side}] {clean_name}\n\n{text}"
                 
                 all_data.append({
@@ -179,28 +233,43 @@ def main():
                 })
                 print(f"    ✓ {len(text)} chars")
             else:
-                print(f"    ️ Empty or too short")
+                print(f"    ⚠ Empty or too short")
     
+    # Process URLs
     url_file = Path(URLS_FILE)
     if url_file.exists():
         urls = [u.strip() for u in url_file.read_text().splitlines() 
                 if u.strip() and not u.strip().startswith('#')]
         
         print(f"\n Found {len(urls)} URLs")
+        
         for url in urls:
             print(f"  🌐 {url}")
             result = scrape_url(url)
             if result:
                 all_data.append(result)
-                print(f"    ✓ {len(result['content'])} chars")
+                print(f"    ✓ Source: {result['source']} | {len(result['content'])} chars")
+            else:
+                print(f"    ✗ Skipped (failed or empty)")
+    else:
+        print(f"\n ⚠ URLs file not found: {URLS_FILE}")
     
+    # Save results
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(all_data, f, ensure_ascii=False, indent=2)
     
-    print(f"\n✅ Saved {len(all_data)} sources")
+    print(f"\n✅ Saved {len(all_data)} sources to {OUTPUT_FILE}")
     print(f"   Trader: {sum(1 for d in all_data if d.get('side') == 'TRADER')}")
     print(f"   Customs: {sum(1 for d in all_data if d.get('side') == 'CUSTOMS')}")
     print(f"   General: {sum(1 for d in all_data if d.get('side') == 'GENERAL')}")
+    
+    # Show contact sources specifically
+    contact_sources = [d['source'] for d in all_data if 'contact' in d['source'].lower()]
+    if contact_sources:
+        print(f"   Contact sources: {contact_sources}")
+    else:
+        print(f"   ⚠ No contact sources found!")
+        print(f"   Check your urls.txt file and ensure the contact page URL is listed.")
 
 if __name__ == "__main__":
     main()
