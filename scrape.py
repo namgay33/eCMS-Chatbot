@@ -313,7 +313,11 @@ def main():
             
             print(f"[{side}] {file_path.name} -> '{clean_name}'")
             
-            text = extract_docx_enhanced(file_path)
+            try:
+                text = extract_docx_enhanced(file_path)
+            except Exception as e:
+                print(f"  [SKIP] Broken DOCX {file_path.name}: {e}")
+                continue
             text = re.sub(r'\s+', ' ', text).strip()
             
             if text and len(text) > 50:
