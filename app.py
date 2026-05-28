@@ -4,7 +4,7 @@ import json
 import random
 from datetime import datetime
 import numpy as np
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, session
 import mysql.connector
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_core.prompts import PromptTemplate
@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "ecms-chatbot-secret-key")
 
 DB_CONFIG = {
     'host': os.environ.get("DB_HOST", "localhost"),
@@ -40,9 +41,10 @@ RULES:
 - RMA means Royal Monetary Authority of Bhutan
 - BIRMS means Bhutan Integrated Revenue Management System
 - CID means Citizen Identity
+- BTC means Bhutan Trade Classification (HS Code system used in Bhutan)
 - eCMS means Electronic Customs Management System (trade records, taxes, passengers travel record, etc)
 - BTFN is not a specific module within the eCMS platform
-- Payment in eCMS is not using BTFN, it is instead done through BIRMS
+- Payment in eCMS is done through BIRMS
 - Both eCMS (trade records) and BTFN (related to monetary) are used by all the countries, not only India
 - Not all services require full registration
 - NEVER mention document names or .docx files
@@ -83,14 +85,27 @@ def init_database():
         timestamp DATETIME
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
+    
+    create_btc = """
+    CREATE TABLE IF NOT EXISTS btc_codes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        hs_code VARCHAR(20) NOT NULL,
+        description TEXT,
+        common_name TEXT,
+        search_text TEXT NOT NULL,
+        FULLTEXT INDEX idx_search (search_text)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(create_knowledge)
     cursor.execute(create_logs)
+    cursor.execute(create_btc)
     conn.commit()
     cursor.close()
     conn.close()
-    print("✅ Database initialized.")
+    print("Database initialized.")
 
 
 def greet(sentence):
@@ -113,7 +128,7 @@ def cosine_similarity(a, b):
 
 
 def clean_chunk_text(raw_text):
-    text = re.sub(r'^\[(TRADER|CUSTOMS|GENERAL)\]\s+', '', raw_text)
+    text = re.sub(r'^\[(TRADER|CUSTOMS|GENERAL|TARIFF)\]\s+', '', raw_text)
     text = re.sub(r'SOURCE_ID:.*?\nTITLE:.*?\n\n', '', text, flags=re.DOTALL)
     text = re.sub(r'SOURCE:.*?\nTITLE:.*?\nTYPE:.*?\n\n', '', text, flags=re.DOTALL)
     text = re.sub(r'DOCUMENT:.*?\nSOURCE:.*?\nTYPE:.*?\n\n', '', text, flags=re.DOTALL)
@@ -141,8 +156,231 @@ def is_process_query(question):
     return any(w in q for w in process_words)
 
 
+def is_btc_query(question):
+    q = question.lower()
+    btc_words = [
+        'btc', 'hs code', 'h.s code', 'h.s. code', 'harmonized system',
+        'trade classification', 'commodity code', 'tariff code', 'classification code',
+        'customs code', 'import code', 'export code', 'hsn', 'schedule b',
+        'code for', 'btc for', 'hs for', 'hscode', 'hs-code',
+        'commodity', 'tariff', 'classification'
+    ]
+    has_code_pattern = bool(re.search(r'\b\d{6,10}\b', question))
+    return any(w in q for w in btc_words) or has_code_pattern
+
+
+def is_btc_info_query(question):
+    """Check if user is asking for statistics/info about BTC database."""
+    q = question.lower()
+    info_words = ['how many', 'total', 'count', 'number of', 'list all', 'show all', 
+                  'all codes', 'all hscodes', 'all btc', 'database size']
+    return any(w in q for w in info_words)
+
+
+def is_btc_followup(question):
+    q = question.lower()
+    followup_words = ['only one', 'single', 'best', 'top', 'final', 'main', 'one code', 
+                      'which code', 'give me', 'show me', 'what is the code', 'the code']
+    return any(w in q for w in followup_words)
+
+
+def extract_search_terms(question):
+    q_lower = question.lower()
+    fillers = ['what', 'is', 'the', 'code', 'for', 'btc', 'hs', 'h.s', 'please', 'tell', 
+               'me', 'about', 'find', 'search', 'lookup', 'of', 'give', 'only', 'one', 
+               'final', 'best', 'single', 'top', 'show', 'which', 'main', 'and', 'list',
+               'its', 'matching', 'too', 'also']
+    words = re.findall(r'\b\w+\b', q_lower)
+    terms = [w for w in words if w not in fillers and len(w) >= 2]
+    return terms
+
+
+def search_btc_codes(question, context_terms=None):
+    terms = extract_search_terms(question)
+    
+    if not terms and context_terms:
+        terms = context_terms
+    
+    code_match = re.search(r'\b(\d{4,10})\b', question)
+    search_code = code_match.group(1) if code_match else None
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    results = []
+    
+    if search_code:
+        cursor.execute(
+            "SELECT hs_code, description, common_name FROM btc_codes WHERE hs_code LIKE %s LIMIT 10",
+            (f"{search_code}%",)
+        )
+        exact_matches = cursor.fetchall()
+        if exact_matches:
+            results.extend(exact_matches)
+    
+    if terms and len(results) < 10:
+        like_conditions = ' OR '.join(['search_text LIKE %s'] * len(terms))
+        like_values = [f"%{t}%" for t in terms]
+        
+        cursor.execute(
+            f"SELECT hs_code, description, common_name FROM btc_codes WHERE {like_conditions} LIMIT 50",
+            like_values
+        )
+        text_matches = cursor.fetchall()
+        
+        seen = {r['hs_code'] for r in results}
+        for r in text_matches:
+            if r['hs_code'] not in seen:
+                results.append(r)
+                seen.add(r['hs_code'])
+    
+    cursor.close()
+    conn.close()
+    
+    return results, terms
+
+
+def get_btc_stats():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT COUNT(*) as total FROM btc_codes")
+    total = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(DISTINCT LEFT(hs_code, 2)) as chapters FROM btc_codes")
+    chapters = cursor.fetchone()['chapters']
+    
+    cursor.execute("SELECT hs_code, description FROM btc_codes ORDER BY hs_code LIMIT 5")
+    first_few = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    
+    lines = []
+    lines.append(f"BTC/HS Code Database Statistics:")
+    lines.append(f"Total codes: {total}")
+    lines.append(f"Chapters covered: {chapters}")
+    lines.append("")
+    lines.append("First few codes:")
+    for r in first_few:
+        lines.append(f"  {r['hs_code']} - {r['description']}")
+    
+    return "\n".join(lines)
+
+
+def score_btc_result(result, terms, search_code):
+    score = 0
+    code = result['hs_code'].lower()
+    desc = result['description'].lower()
+    common = result['common_name'].lower() if result['common_name'] else ''
+    
+    if search_code and search_code in code:
+        score += 100
+        if code.startswith(search_code):
+            score += 50
+    
+    for term in terms:
+        if term in desc:
+            score += 25
+        if term in code:
+            score += 20
+        if term in common:
+            score += 5
+    
+    desc_words = desc.split()
+    for term in terms:
+        if any(term == w or term in w for w in desc_words):
+            score += 15
+    
+    if len(code) >= 6 and search_code and code.startswith(search_code[:4]):
+        score += 10
+    
+    if 'other' in desc and len(terms) > 0:
+        score -= 10
+    
+    return score
+
+
+def format_btc_results(results, question, terms, single_mode=False, list_matches=False):
+    if not results:
+        code_match = re.search(r'\b(\d{4,10})\b', question)
+        if code_match:
+            return f"No BTC/HS code found starting with {code_match.group(1)}. Please verify the code or check the official BTC reference."
+        
+        if terms:
+            return f"No results found for '{' '.join(terms)}'. Try searching with exact product name or BTC code number."
+        
+        return "Please provide a product name or BTC/HS code number to search."
+    
+    code_match = re.search(r'\b(\d{4,10})\b', question)
+    search_code = code_match.group(1) if code_match else None
+    
+    scored_results = []
+    for r in results:
+        s = score_btc_result(r, terms, search_code)
+        scored_results.append((s, r))
+    
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    
+    if single_mode and not list_matches:
+        best = scored_results[0][1]
+        code = best['hs_code']
+        desc = best['description']
+        common = best['common_name']
+        
+        lines = []
+        lines.append(f"The BTC/HS Code is: {code}")
+        lines.append(f"Description: {desc}")
+        if common:
+            common_short = common[:150] + "..." if len(common) > 150 else common
+            lines.append(f"Common Names: {common_short}")
+        
+        return "\n".join(lines)
+    
+    if single_mode and list_matches:
+        best = scored_results[0][1]
+        code = best['hs_code']
+        desc = best['description']
+        common = best['common_name']
+        
+        lines = []
+        lines.append(f"The BTC/HS Code is: {code}")
+        lines.append(f"Description: {desc}")
+        if common:
+            common_short = common[:150] + "..." if len(common) > 150 else common
+            lines.append(f"Common Names: {common_short}")
+        
+        other_matches = [x[1] for x in scored_results[1:6]]
+        if other_matches:
+            lines.append("")
+            lines.append("Other matching codes:")
+            for r in other_matches:
+                lines.append(f"  {r['hs_code']} - {r['description']}")
+        
+        return "\n".join(lines)
+    
+    lines = []
+    lines.append("Here are the matching BTC/HS Code entries:")
+    lines.append("")
+    
+    for i, (score, r) in enumerate(scored_results[:10], 1):
+        code = r['hs_code']
+        desc = r['description']
+        common = r['common_name']
+        
+        lines.append(f"{i}. Code: {code}")
+        lines.append(f"   Description: {desc}")
+        if common:
+            common_display = common[:200] + "..." if len(common) > 200 else common
+            lines.append(f"   Common Names: {common_display}")
+        lines.append("")
+    
+    if len(scored_results) > 10:
+        lines.append(f"... and {len(scored_results) - 10} more matches.")
+    
+    return "\n".join(lines)
+
+
 def parse_contact_table(text):
-    """Parse contact information from scraped text with robust location detection."""
     contacts = []
     lines = text.split('\n')
     
@@ -150,20 +388,17 @@ def parse_contact_table(text):
         line = line.strip()
         if not line:
             continue
-        # Skip headers and metadata
         if any(line.startswith(x) for x in ['SOURCE:', 'TITLE:', 'TYPE:', 'EXTRA', 'PAGE CONTENT:', '##']):
             continue
         if any(h in line.lower() for h in ['sl#', 's.no', 'serial', 'department', 'name', 'phone number', 'email', 'designation', 'location']):
-            if len(line) < 50:  # Only skip if it's clearly a header row
+            if len(line) < 50:
                 continue
         
         parts = [p.strip() for p in line.split('|')]
         
-        # Try to detect location from any part of the line
         full_line = ' '.join(parts).lower()
-        location = 'Thimphu'  # Default
+        location = 'Thimphu'
         
-        # Location detection from any field
         location_keywords = {
             'Thimphu': ['thimphu'],
             'Gelephu': ['gelephu'],
@@ -179,7 +414,6 @@ def parse_contact_table(text):
                 location = loc_name
                 break
         
-        # Extract phone and email from all parts
         phone = ''
         email = ''
         department = ''
@@ -191,11 +425,9 @@ def parse_contact_table(text):
             elif re.search(r'[\d\+\-\s]{7,}', p) and any(c.isdigit() for c in p):
                 phone = p.strip()
             elif len(p) > 3 and not any(x in p_lower for x in ['phone', 'email', 'fax']):
-                # Could be department name
                 if not department and len(p) > 5:
                     department = p.strip()
         
-        # If we found any contact info, add it
         if phone or email:
             contacts.append({
                 'department': department or location,
@@ -227,7 +459,6 @@ def get_contacts_by_location(question, all_contacts):
             break
     
     if asked_location:
-        # Normalize for comparison
         asked_normalized = asked_location.replace(' ', '').lower()
         filtered = []
         for c in all_contacts:
@@ -236,7 +467,6 @@ def get_contacts_by_location(question, all_contacts):
                 filtered.append(c)
         
         if not filtered:
-            # Fuzzy match
             for c in all_contacts:
                 if asked_normalized in c['location'].lower().replace(' ', ''):
                     filtered.append(c)
@@ -296,7 +526,7 @@ def search_knowledge(question, top_k=5, threshold=0.55):
         'refund': ['refund', 'repayment', 'claim back', 'reimbursement'],
         'duty free': ['duty free', 'quota', 'liquor', 'tobacco', 'allowance'],
         'contact': ['contact', 'phone', 'email', 'office', 'help desk', 'support', 'focal'],
-        'tariff': ['tariff', 'hs code', 'classification', 'duty rate', 'tax rate'],
+        'tariff': ['tariff', 'hs code', 'btc', 'classification', 'duty rate', 'tax rate', 'commodity', 'harmonized'],
         'warehouse': ['warehouse', 'bonded', 'storage', 'depot']
     }
     
@@ -347,21 +577,37 @@ def get_response(question):
     if q_lower == 'thanks' or q_lower == 'thank you':
         return "You are welcome!"
     
-    # FIXED: Contact query - search by embedding for contact-related content if no explicit contact source
+    if is_btc_info_query(question):
+        return get_btc_stats()
+    
+    if is_btc_query(question) or is_btc_followup(question):
+        context_terms = None
+        single_mode = any(w in q_lower for w in ['only one', 'single', 'best', 'top', 'final', 'main', 'one code', 'which code'])
+        list_matches = any(w in q_lower for w in ['list', 'matching', 'and', 'also', 'too'])
+        
+        if is_btc_followup(question) and not is_btc_query(question):
+            context_terms = session.get('last_btc_terms', None)
+            if not context_terms:
+                return "What product are you looking for the BTC/HS code? Please mention the product name."
+        
+        results, terms = search_btc_codes(question, context_terms)
+        
+        if terms:
+            session['last_btc_terms'] = terms
+        
+        return format_btc_results(results, question, terms, single_mode=single_mode, list_matches=list_matches)
+    
     if is_contact_query(q_lower):
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
-        # Try exact contact sources first
         cursor.execute(
             "SELECT chunk_text, source FROM ecms_knowledge WHERE source = %s OR source LIKE %s OR source LIKE %s",
             ("contact_webpage", "%contact%", "%focal%")
         )
         contact_rows = cursor.fetchall()
         
-        # If no explicit contact source, search by content
         if not contact_rows:
-            print("⚠ No explicit contact source found, searching by content...")
             cursor.execute("SELECT chunk_text, source FROM ecms_knowledge")
             all_rows = cursor.fetchall()
             contact_rows = []
@@ -380,15 +626,12 @@ def get_response(question):
                 contacts = parse_contact_table(text)
                 all_contacts.extend(contacts)
             
-            # Also try to extract from raw text if table parsing fails
             if not all_contacts:
                 for row in contact_rows:
                     text = clean_chunk_text(row['chunk_text'])
-                    # Simple line-by-line extraction for non-table content
                     lines = text.split('\n')
                     for line in lines:
                         if any(x in line.lower() for x in ['+975', 'phone', 'tel', 'email', '@']):
-                            # Try to parse as contact
                             parts = [p.strip() for p in line.split('|') if p.strip()]
                             if len(parts) >= 2:
                                 phone = ''
@@ -420,11 +663,10 @@ def get_response(question):
             if unique_contacts:
                 return format_contacts(unique_contacts)
         
-        # Last resort: use RAG with contact-focused search
         chunks = search_knowledge(question)
         if chunks:
             context_parts = []
-            for c in chunks:
+            for c in chunks[:3]:
                 context_parts.append(c['text'][:2000])
             
             context = "\n\n".join(context_parts)
@@ -569,7 +811,8 @@ def get_highlighted_questions():
         "⚖️ What is eCMS?",
         "📝 How to register in eCMS?",
         "💰 How is eCMS related to BTFN?",
-        "❓ How does eCMS work?"
+        "❓ How does eCMS work?",
+        "📋 What is the BTC code for horses?"
     ]
 
 
@@ -596,9 +839,11 @@ def stats():
         knowledge = cursor.fetchone()['total']
         cursor.execute("SELECT COUNT(*) as total FROM ecms_chatbot_logs")
         logs = cursor.fetchone()['total']
+        cursor.execute("SELECT COUNT(*) as total FROM btc_codes")
+        btc = cursor.fetchone()['total']
         cursor.close()
         conn.close()
-        return {"knowledge_chunks": knowledge, "chat_logs": logs}
+        return {"knowledge_chunks": knowledge, "chat_logs": logs, "btc_codes": btc}
     except Exception as e:
         return {"error": str(e)}
 
@@ -610,15 +855,22 @@ if __name__ == '__main__':
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM ecms_knowledge")
     count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM btc_codes")
+    btc_count = cursor.fetchone()[0]
     cursor.close()
     conn.close()
     
     if count == 0:
-        print("⚠️ WARNING: No knowledge chunks found in database!")
-        print("   Run: python build_db.py")
+        print("WARNING: No knowledge chunks found in database!")
+        print("Run: python build_db.py")
     else:
-        print(f"📚 Knowledge base loaded: {count} chunks")
+        print(f"Knowledge base loaded: {count} chunks")
+    
+    if btc_count == 0:
+        print("WARNING: No BTC codes found!")
+    else:
+        print(f"BTC codes loaded: {btc_count} records")
     
     port = int(os.environ.get("FLASK_PORT", 5000))
-    print(f"🚀 eCMS Chatbot: http://127.0.0.1:{port}")
+    print(f"eCMS Chatbot: http://127.0.0.1:{port}")
     app.run(use_reloader=False, debug=False, port=port)

@@ -6,6 +6,13 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from docx import Document
 
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+    print("openpyxl not installed. Run: pip install openpyxl")
+
 OUTPUT_FILE = "ecms_content.json"
 DOCUMENTS_FOLDER = "./documents"
 URLS_FILE = "./urls.txt"
@@ -95,6 +102,105 @@ def extract_docx_enhanced(path):
     
     return full_text.strip()
 
+def extract_excel_btc(path):
+    if not HAS_OPENPYXL:
+        return None
+    
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        
+        all_records = []
+        
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            
+            headers = []
+            first_row = next(ws.iter_rows(values_only=True))
+            for cell in first_row:
+                headers.append(str(cell).strip().lower().replace(' ', '_') if cell else f"col_{len(headers)}")
+            
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row):
+                    continue
+                
+                record = {}
+                for i, cell in enumerate(row):
+                    if i < len(headers):
+                        key = headers[i]
+                        value = str(cell).strip() if cell is not None else ""
+                        if value and value.lower() not in ['none', 'nan', 'null']:
+                            record[key] = value
+                
+                if record:
+                    all_records.append(record)
+        
+        if not all_records:
+            return None
+        
+        content_parts = []
+        content_parts.append(f"## BTC/HS Code Reference Database")
+        content_parts.append(f"Total Records: {len(all_records)}")
+        content_parts.append(f"Source File: {Path(path).name}")
+        content_parts.append("")
+        content_parts.append("## Search Guide")
+        content_parts.append("Search by: code number, product description, or common name")
+        content_parts.append("BTC codes are 8 digits (e.g., 01012100)")
+        content_parts.append("HS codes are 6-10 digits (e.g., 0101.21)")
+        content_parts.append("")
+        
+        for i, record in enumerate(all_records, 1):
+            code = record.get('hs/btc_code', record.get('hs_code', record.get('btc_code', record.get('code', ''))))
+            desc = record.get('description', '')
+            common = record.get('common_name', '')
+            
+            if not code and not desc:
+                continue
+            
+            entry_lines = [f"Entry {i}:"]
+            entry_lines.append(f"  Code: {code}")
+            entry_lines.append(f"  Description: {desc}")
+            if common:
+                entry_lines.append(f"  Common Names: {common}")
+            
+            keywords = []
+            if desc:
+                keywords.extend(re.findall(r'\b\w{3,}\b', desc.lower()))
+            if common:
+                keywords.extend(re.findall(r'\b\w{3,}\b', common.lower()))
+            if code:
+                keywords.append(code)
+                if len(code) >= 6:
+                    keywords.append(code[:6])
+                    keywords.append(code[:4])
+                    keywords.append(code[:2])
+            
+            if keywords:
+                entry_lines.append(f"  Search Keywords: {', '.join(set(keywords))}")
+            
+            content_parts.append("\n".join(entry_lines))
+        
+        chapters = {}
+        for record in all_records:
+            code = record.get('hs/btc_code', record.get('hs_code', record.get('btc_code', '')))
+            if len(str(code)) >= 2:
+                chapter = str(code)[:2]
+                if chapter not in chapters:
+                    chapters[chapter] = []
+                desc = record.get('description', '')[:50]
+                chapters[chapter].append(f"{code}: {desc}")
+        
+        content_parts.append("")
+        content_parts.append("## Chapter Summaries")
+        for chapter, items in sorted(chapters.items())[:20]:
+            content_parts.append(f"Chapter {chapter}: {len(items)} items")
+            content_parts.append(f"  Examples: {'; '.join(items[:3])}")
+        
+        return "\n\n".join(content_parts)
+        
+    except Exception as e:
+        print(f"Excel extraction failed: {e}")
+        return None
+
 def scrape_url(url):
     try:
         headers = {
@@ -104,19 +210,17 @@ def scrape_url(url):
             'Connection': 'keep-alive',
         }
         
-        print(f"    → Fetching {url}...")
+        print(f"Fetching {url}...")
         resp = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         
-        # Check if we got redirected to a different page
         if resp.url != url:
-            print(f"    → Redirected to {resp.url}")
+            print(f"Redirected to {resp.url}")
         
         resp.raise_for_status()
         
-        # Check if we actually got HTML
         content_type = resp.headers.get('content-type', '').lower()
         if 'text/html' not in content_type:
-            print(f"    ⚠ Non-HTML content: {content_type}")
+            print(f"Non-HTML content: {content_type}")
             return None
         
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -126,19 +230,16 @@ def scrape_url(url):
         
         title = soup.title.string.strip() if soup.title else url
         
-        # BROADER contact detection - catch contact, contacts, contact-us, contactus, focal, helpdesk
         url_lower = url.lower()
         is_contact_page = any(x in url_lower for x in ['contact', 'focal', 'helpdesk', 'help-desk', 'support'])
         
-        # Also check page title/content for contact indicators if URL doesn't match
         if not is_contact_page and title:
             title_lower = title.lower()
             is_contact_page = any(x in title_lower for x in ['contact', 'focal person', 'help desk', 'support'])
         
         if is_contact_page:
-            print(f"    ✓ Detected as CONTACT page")
+            print(f"Detected as CONTACT page")
             
-            # Extract ALL tables (contact info is usually in tables)
             tables = soup.find_all('table')
             contact_text = f"SOURCE: {url}\nTITLE: {title}\nTYPE: CONTACT_PAGE\n\n"
             
@@ -151,23 +252,19 @@ def scrape_url(url):
                         contact_text += row_text + "\n"
                 contact_text += "\n"
             
-            # Also extract any paragraph/div text that might contain contact info
             main = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|main|body'))
             if main:
-                # Get all paragraphs and divs with text
                 text_elements = main.find_all(['p', 'div', 'li'])
                 extra_lines = []
                 for elem in text_elements:
                     text = elem.get_text(strip=True)
                     if text and len(text) > 10:
-                        # Look for phone/email/location indicators
                         if any(indicator in text.lower() for indicator in ['phone', 'tel', 'email', '@', 'thimphu', 'gelephu', 'paro', 'samdrup', 'samtse', 'phuntsholing', 'kolkata', 'office', 'department']):
                             extra_lines.append(text)
                 
                 if extra_lines:
                     contact_text += "\nEXTRA CONTACT INFO:\n" + "\n".join(extra_lines[:50])
             
-            # If no tables found, just grab all text
             if not tables:
                 text = soup.get_text(separator='\n', strip=True)
                 text = re.sub(r'\n+', '\n', text)
@@ -181,7 +278,6 @@ def scrape_url(url):
                 "side": "GENERAL"
             }
         
-        # Non-contact pages
         main = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile('content|main'))
         text = main.get_text(separator='\n', strip=True) if main else soup.get_text(separator='\n', strip=True)
         
@@ -197,26 +293,25 @@ def scrape_url(url):
         }
         
     except requests.exceptions.RequestException as e:
-        print(f"    ✗ Network error: {url} — {e}")
+        print(f"Network error: {url} — {e}")
         return None
     except Exception as e:
-        print(f"    ✗ Failed: {url} — {e}")
+        print(f"Failed: {url} — {e}")
         return None
 
 def main():
     all_data = []
     
-    # Process DOCX files
     doc_folder = Path(DOCUMENTS_FOLDER)
     if doc_folder.exists():
         docx_files = sorted(doc_folder.glob("*.docx"))
-        print(f" Found {len(docx_files)} DOCX files")
+        print(f"Found {len(docx_files)} DOCX files")
         
         for file_path in docx_files:
             side = detect_side(file_path.name)
             clean_name = clean_filename(file_path.name)
             
-            print(f"  📄 [{side}] {file_path.name} → '{clean_name}'")
+            print(f"[{side}] {file_path.name} -> '{clean_name}'")
             
             text = extract_docx_enhanced(file_path)
             text = re.sub(r'\s+', ' ', text).strip()
@@ -231,45 +326,71 @@ def main():
                     "type": "document",
                     "side": side
                 })
-                print(f"    ✓ {len(text)} chars")
+                print(f"{len(text)} chars")
             else:
-                print(f"    ⚠ Empty or too short")
+                print("Empty or too short")
+        
+        if HAS_OPENPYXL:
+            excel_files = sorted(doc_folder.glob("*.xlsx")) + sorted(doc_folder.glob("*.xls"))
+            print(f"\nFound {len(excel_files)} Excel files")
+            
+            for file_path in excel_files:
+                print(f"[BTC/HS] {file_path.name}")
+                
+                text = extract_excel_btc(file_path)
+                
+                if text and len(text) > 50:
+                    source_name = f"BTC_{Path(file_path.name).stem}"
+                    
+                    all_data.append({
+                        "source": source_name,
+                        "title": f"BTC/HS Code Reference - {Path(file_path.name).stem}",
+                        "content": f"[TARIFF] {source_name}\n\n{text}",
+                        "type": "excel",
+                        "side": "GENERAL"
+                    })
+                    print(f"{len(text)} chars")
+                else:
+                    print("Empty or failed to extract")
+        else:
+            print(f"\nopenpyxl not available, skipping Excel files")
     
-    # Process URLs
     url_file = Path(URLS_FILE)
     if url_file.exists():
         urls = [u.strip() for u in url_file.read_text().splitlines() 
                 if u.strip() and not u.strip().startswith('#')]
         
-        print(f"\n Found {len(urls)} URLs")
+        print(f"\nFound {len(urls)} URLs")
         
         for url in urls:
-            print(f"  🌐 {url}")
+            print(f"{url}")
             result = scrape_url(url)
             if result:
                 all_data.append(result)
-                print(f"    ✓ Source: {result['source']} | {len(result['content'])} chars")
+                print(f"Source: {result['source']} | {len(result['content'])} chars")
             else:
-                print(f"    ✗ Skipped (failed or empty)")
+                print("Skipped (failed or empty)")
     else:
-        print(f"\n ⚠ URLs file not found: {URLS_FILE}")
+        print(f"\nURLs file not found: {URLS_FILE}")
     
-    # Save results
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(all_data, f, ensure_ascii=False, indent=2)
     
-    print(f"\n✅ Saved {len(all_data)} sources to {OUTPUT_FILE}")
-    print(f"   Trader: {sum(1 for d in all_data if d.get('side') == 'TRADER')}")
-    print(f"   Customs: {sum(1 for d in all_data if d.get('side') == 'CUSTOMS')}")
-    print(f"   General: {sum(1 for d in all_data if d.get('side') == 'GENERAL')}")
+    print(f"\nSaved {len(all_data)} sources to {OUTPUT_FILE}")
+    print(f"Trader: {sum(1 for d in all_data if d.get('side') == 'TRADER')}")
+    print(f"Customs: {sum(1 for d in all_data if d.get('side') == 'CUSTOMS')}")
+    print(f"General: {sum(1 for d in all_data if d.get('side') == 'GENERAL')}")
     
-    # Show contact sources specifically
     contact_sources = [d['source'] for d in all_data if 'contact' in d['source'].lower()]
+    btc_sources = [d['source'] for d in all_data if d.get('type') == 'excel']
+    
     if contact_sources:
-        print(f"   Contact sources: {contact_sources}")
+        print(f"Contact sources: {contact_sources}")
     else:
-        print(f"   ⚠ No contact sources found!")
-        print(f"   Check your urls.txt file and ensure the contact page URL is listed.")
+        print("No contact sources found!")
+    
+    if btc_sources:
+        print(f"BTC/HS sources: {btc_sources}")
 
 if __name__ == "__main__":
     main()
