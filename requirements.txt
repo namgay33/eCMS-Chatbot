@@ -2,19 +2,14 @@ flask==3.0.3
 mysql-connector-python==9.0.0
 beautifulsoup4==4.12.3
 python-dotenv==1.0.1
-
-# Document parsing
 PyPDF2==3.0.1
 python-docx==1.1.2
 python-pptx==0.6.23
-openpyxl
-# LangChain + Ollama
+openpyxl==3.1.5
 langchain==0.2.0
 langchain-ollama==0.1.0
 langchain-text-splitters==0.2.0
-
-# URL scraping
+langchain-core==0.2.20
 requests==2.32.3
-
-# Math
 numpy==1.26.4
+gunicorn==23.0.0
